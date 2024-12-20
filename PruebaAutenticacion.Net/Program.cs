@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 
@@ -9,20 +10,23 @@ builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddSingleton<LdapService>();
 
-
-builder.Services.AddAuthentication("Bearer")
+// Configurar autenticación JWT
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
         options.TokenValidationParameters = new TokenValidationParameters
         {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = "Emermedica",
-            ValidAudience = "EmermedicaUsers",
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes("YourSecretKey"))
+            ValidateIssuer = true, // Validar el emisor
+            ValidateAudience = true, // Validar la audiencia
+            ValidateLifetime = true, // Validar la expiración del token
+            ValidateIssuerSigningKey = true, // Validar la clave de firma
+            ValidIssuer = builder.Configuration["Jwt:Issuer"], // Emisor esperado
+            ValidAudience = builder.Configuration["Jwt:Audience"], // Audiencia esperada
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]) // Clave de firma
+            )
         };
     });
 
