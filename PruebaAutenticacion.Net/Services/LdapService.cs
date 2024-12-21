@@ -1,6 +1,5 @@
-﻿using System;
-using System.Collections.Generic;
-using Novell.Directory.Ldap;
+﻿using System.DirectoryServices.Protocols;
+using System.Net;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -15,61 +14,62 @@ public class LdapService
         _logger = logger;
     }
 
-    public (bool IsAuthenticated, Dictionary<string, string> UserInfo, string ErrorMessage, int ErrorCode) AuthenticateUser(string username, string password)
+    public (bool IsAuthenticated, Dictionary<string, string> UserInfo, string ErrorMessage) AuthenticateUser(string username, string password)
     {
         string ldapServer = _configuration["LDAP:Server"];
         int ldapPort = int.Parse(_configuration["LDAP:Port"]);
         string baseDn = _configuration["LDAP:BaseDn"];
-        string ldapUser = $"uid={username},ou=users,dc=example,dc=com"; // Nombre distinguido (DN).
+        string ldapUser = $"{username}@example.com"; // Ajusta el formato según tu configuración LDAP
 
         try
         {
-            using (var ldapConnection = new LdapConnection())
+            using (var ldapConnection = new LdapConnection(new LdapDirectoryIdentifier(ldapServer, ldapPort)))
             {
-                // Conexión al servidor LDAP
-                ldapConnection.Connect(ldapServer, ldapPort);
+                ldapConnection.Credential = new NetworkCredential(ldapUser, password);
+                ldapConnection.AuthType = AuthType.Basic;
 
-                // Intento de autenticación
-                ldapConnection.Bind(ldapUser, password); // Simple bind
+                // Intenta autenticar
+                ldapConnection.Bind();
 
-                // Buscar información del usuario
-                var searchFilter = $"(sAMAccountName={username})";
-                var searchResults = ldapConnection.Search(
+                // Busca información del usuario
+                var searchRequest = new SearchRequest(
                     baseDn,
-                    LdapConnection.ScopeSub,
-                    searchFilter,
-                    new string[] { "displayName", "mail", "department", "title" },
-                    false); // No devolver contraseñas
+                    $"(sAMAccountName={username})",
+                    SearchScope.Subtree,
+                    "displayName", "mail", "department", "title");
 
-                if (searchResults.HasMore())
+                var searchResponse = (SearchResponse)ldapConnection.SendRequest(searchRequest);
+
+                if (searchResponse.Entries.Count > 0)
                 {
-                    var entry = searchResults.Next();
+                    var entry = searchResponse.Entries[0];
                     var userInfo = new Dictionary<string, string>
                     {
                         { "username", username },
-                        { "displayName", entry.GetAttribute("displayName")?.StringValue ?? string.Empty },
-                        { "email", entry.GetAttribute("mail")?.StringValue ?? string.Empty },
-                        { "department", entry.GetAttribute("department")?.StringValue ?? string.Empty },
-                        { "title", entry.GetAttribute("title")?.StringValue ?? string.Empty }
+                        { "displayName", entry.Attributes["displayName"]?[0]?.ToString() ?? string.Empty },
+                        { "email", entry.Attributes["mail"]?[0]?.ToString() ?? string.Empty },
+                        { "department", entry.Attributes["department"]?[0]?.ToString() ?? string.Empty },
+                        { "title", entry.Attributes["title"]?[0]?.ToString() ?? string.Empty }
                     };
 
-                    return (true, userInfo, string.Empty, 0); // No error
+                    return (true, userInfo, string.Empty); // Autenticación exitosa
                 }
                 else
                 {
-                    return (false, null, "User not found.", 404); // User not found
+                    _logger.LogWarning($"User {username} not found in LDAP.");
+                    return (false, null, "User not found in LDAP.");
                 }
             }
         }
         catch (LdapException ex)
         {
-            _logger.LogError($"LDAP error: {ex.Message}");
-            return (false, null, ex.Message, 500); // Internal server error
+            _logger.LogError($"LDAP error during authentication: {ex.Message}");
+            return (false, null, $"LDAP error: {ex.Message}"); // Error de LDAP
         }
         catch (Exception ex)
         {
             _logger.LogError($"General error: {ex.Message}");
-            return (false, null, ex.Message, 500); // General error
+            return (false, null, $"General error: {ex.Message}"); // Error general
         }
     }
 }

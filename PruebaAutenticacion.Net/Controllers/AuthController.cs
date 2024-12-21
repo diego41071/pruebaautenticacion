@@ -1,89 +1,99 @@
-﻿using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.IdentityModel.Tokens;
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
-using System.Text;
+﻿using System;
+using System.Collections.Generic;
+using Novell.Directory.Ldap;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
-[ApiController]
-[Route("api/")]
-public class AuthController : ControllerBase
+public class LdapService
 {
-    private readonly LdapService _ldapService;
     private readonly IConfiguration _configuration;
+    private readonly ILogger<LdapService> _logger;
 
-    public AuthController(LdapService ldapService, IConfiguration configuration)
+    public LdapService(IConfiguration configuration, ILogger<LdapService> logger)
     {
-        _ldapService = ldapService;
         _configuration = configuration;
+        _logger = logger;
     }
 
-    [HttpPost("authenticate")]
-    [AllowAnonymous]
-    public IActionResult Authenticate([FromBody] LoginRequest request)
+    public (bool IsAuthenticated, Dictionary<string, string> UserInfo, string ErrorMessage, int ErrorCode) AuthenticateUser(string username, string password)
     {
+        string ldapServer = _configuration["LDAP:Server"];
+        int ldapPort = int.Parse(_configuration["LDAP:Port"]);
+        string baseDn = _configuration["LDAP:BaseDn"];
+        string ldapUser = $"uid={username},ou=users,dc=example,dc=com"; // Nombre distinguido (DN).
+
         try
         {
-            // Llamar al servicio LDAP para autenticar al usuario
-            var (isAuthenticated, userInfo, errorMessage, errorCode) = _ldapService.AuthenticateUser(request.Username, request.Password);
+            _logger.LogInformation($"Attempting to authenticate user '{username}' against LDAP server '{ldapServer}:{ldapPort}'");
 
-            if (!isAuthenticated)
+            using (var ldapConnection = new LdapConnection())
             {
-                // Si la autenticación falla, retorna un error detallado
-                if (errorCode == 404)
+                // Conexión al servidor LDAP
+                ldapConnection.Connect(ldapServer, ldapPort);
+                _logger.LogInformation($"Connected to LDAP server at {ldapServer}:{ldapPort}");
+
+                // Intento de autenticación
+                ldapConnection.Bind(ldapUser, password); // Simple bind
+                _logger.LogInformation($"User '{username}' bound to LDAP server successfully.");
+
+                // Buscar información del usuario
+                var searchFilter = $"(uid={username})";
+                var searchResults = ldapConnection.Search(
+                    baseDn,
+                    LdapConnection.ScopeSub,
+                    searchFilter,
+                    new string[] { "displayName", "mail", "department", "title" },
+                    false); // No devolver contraseñas
+
+                if (searchResults.HasMore())
                 {
-                    return NotFound(new { status = "error", message = errorMessage }); // Usuario no encontrado
-                }
-                else if (errorCode == 500)
-                {
-                    return StatusCode(500, new { status = "error", message = errorMessage }); // Error en el servidor LDAP
+                    var entry = searchResults.Next();
+                    var userInfo = new Dictionary<string, string>
+                    {
+                        { "username", username },
+                        { "displayName", entry.GetAttribute("displayName")?.StringValue ?? string.Empty },
+                        { "email", entry.GetAttribute("mail")?.StringValue ?? string.Empty },
+                        { "department", entry.GetAttribute("department")?.StringValue ?? string.Empty },
+                        { "title", entry.GetAttribute("title")?.StringValue ?? string.Empty }
+                    };
+
+                    return (true, userInfo, string.Empty, 0); // No error
                 }
                 else
                 {
-                    return Unauthorized(new { status = "error", message = errorMessage }); // Credenciales inválidas
+                    string errorMessage = "User not found in LDAP directory.";
+                    _logger.LogWarning($"Authentication failed: {errorMessage} for user '{username}'.");
+                    return (false, null, errorMessage, 404); // User not found
                 }
             }
-
-            // Si la autenticación es exitosa, devuelve los datos del usuario
-            return Ok(new
-            {
-                status = "success",
-                user = userInfo
-            });
+        }
+        catch (LdapException ex)
+        {
+            // Registrar error LDAP específico
+            string errorMessage = $"LDAP error occurred. Code: {ex.ResultCode}, Message: {ex.Message}";
+            _logger.LogError(errorMessage);
+            return (false, null, errorMessage, 500); // Internal server error
+        }
+        catch (ArgumentException ex)
+        {
+            // Error de argumento
+            string errorMessage = $"Argument error occurred. Message: {ex.Message}";
+            _logger.LogError(errorMessage);
+            return (false, null, errorMessage, 400); // Bad request error
+        }
+        catch (TimeoutException ex)
+        {
+            // Error de tiempo de espera
+            string errorMessage = $"Connection to LDAP server timed out. Message: {ex.Message}";
+            _logger.LogError(errorMessage);
+            return (false, null, errorMessage, 504); // Gateway timeout
         }
         catch (Exception ex)
         {
-            // Registrar el error para mayor información en el servidor
-            Console.WriteLine($"Error: {ex.Message}");
-
-            // Responder con un error de servidor interno
-            return StatusCode(500, new { status = "error", message = "Internal Server Error" });
+            // Capturar otros errores generales
+            string errorMessage = $"Unexpected error occurred. Message: {ex.Message}";
+            _logger.LogError(errorMessage);
+            return (false, null, errorMessage, 500); // General error
         }
     }
-
-
-
-    private string GenerateJwtToken(string username)
-    {
-        var key = Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]);
-        var tokenDescriptor = new SecurityTokenDescriptor
-        {
-            Subject = new ClaimsIdentity(new[] { new Claim(ClaimTypes.Name, username) }),
-            Expires = DateTime.UtcNow.AddHours(1),
-            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature),
-            Issuer = _configuration["Jwt:Issuer"],
-            Audience = _configuration["Jwt:Audience"]
-        };
-
-        var tokenHandler = new JwtSecurityTokenHandler();
-        var token = tokenHandler.CreateToken(tokenDescriptor);
-        return tokenHandler.WriteToken(token);
-    }
 }
-
-public class LoginRequest
-{
-    public string Username { get; set; }
-    public string Password { get; set; }
-}
-

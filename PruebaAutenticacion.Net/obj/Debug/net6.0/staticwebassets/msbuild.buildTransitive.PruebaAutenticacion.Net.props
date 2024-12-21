@@ -1,3 +1,0 @@
-﻿<Project>
-  <Import Project="..\buildMultiTargeting\PruebaAutenticacion.Net.props" />
-</Project>
